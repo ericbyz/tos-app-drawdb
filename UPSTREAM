@@ -1,0 +1,27 @@
+# Upstream project pin — single source of truth for reproducible builds.
+# drawdb is built from upstream drawdb-io/drawdb source (AGPL-3.0) at a
+# pinned commit. Upstream publishes no full-site artifact, so
+# scripts/build_web.sh produces the dist once and locks its SHA256 manifest
+# (webui/SHA256SUMS). The dist is committed to this repo so the deb can be
+# rebuilt anywhere without a node toolchain.
+
+UPSTREAM_REPO=https://github.com/drawdb-io/drawdb
+UPSTREAM_LICENSE=AGPL-3.0
+
+UPSTREAM_TAG=v1.9.0
+UPSTREAM_VERSION=1.9.0
+UPSTREAM_COMMIT=a249c7fb730c2de9b5c2ce6e863f2ea7344ac372
+
+# toolchain pin for scripts/build_web.sh (build only; deb ships committed dist)
+NODE_VERSION=22.20.0
+NODE_DIST_URL=https://nodejs.org/dist
+
+# build settings (vite CLI overrides — upstream sources stay unmodified)
+VITE_BASE=/drawdb/
+
+# runtime vendors bundled into the dist for intranet use (upstream loads
+# them from CDNs; scripts/build_web.sh downloads + localizes)
+MONACO_NPM=monaco-editor@0.52.2
+PDFOBJECT_URL=https://cdnjs.cloudflare.com/ajax/libs/pdfobject/2.1.1/pdfobject.min.js
+BOOTSTRAP_ICONS_CSS=https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.1/font/bootstrap-icons.css
+FONTAWESOME_CSS=https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css

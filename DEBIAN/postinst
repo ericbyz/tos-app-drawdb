@@ -1,0 +1,25 @@
+#!/bin/bash
+# Post-installation script — pure static app: nothing to start.
+set -e
+
+APPID="drawdb"
+APP_DIR="/usr/local/${APPID}"
+
+if ! id -u "${APPID}" > /dev/null 2>&1; then
+    useradd --system --no-create-home --shell /usr/sbin/nologin "${APPID}" 2>/dev/null || true
+fi
+
+chown -R "${APPID}:${APPID}" "${APP_DIR}" 2>/dev/null || true
+
+case "$1" in
+    configure)
+        if [ -n "$2" ]; then
+            echo "${APPID}: upgrading from version $2"
+        fi
+        ;;
+    *) ;;
+esac
+
+echo "${APPID} installed successfully."
+echo "  editor: floating window, or http://<NAS>/drawdb/"
+exit 0

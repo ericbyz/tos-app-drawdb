@@ -1,0 +1,17 @@
+Package: drawdb
+Version: 1.9.0
+Architecture: amd64
+Section: devel
+Priority: optional
+Maintainer: ericbyz <ericbyz@users.noreply.github.com>
+Depends: systemd
+Description: Database entity relationship diagram editor (DrawDB)
+ DrawDB is a free, simple and extensible online database diagram editor:
+ design ER diagrams visually, export SQL for MySQL/PostgreSQL/SQLite/
+ MariaDB/MSSQL and more, and generate diagrams from DBML. This package
+ serves the upstream SPA as pure static files from the TOS web server
+ (no background service, no extra port) inside the desktop floating
+ window at http://<NAS>/drawdb/.
+ Built from upstream drawdb-io/drawdb v1.9.0 (AGPL-3.0) at a pinned
+ commit, dist SHA256-locked; monaco editor and icon fonts are bundled
+ locally (intranet-safe, no CDN).

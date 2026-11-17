@@ -1,0 +1,8 @@
+#!/bin/bash
+set -e
+APPID="drawdb"
+if [ "$1" = "purge" ]; then
+    id -u "${APPID}" >/dev/null 2>&1 && userdel "${APPID}" 2>/dev/null || true
+    rm -rf /usr/local/drawdb 2>/dev/null || true
+fi
+exit 0

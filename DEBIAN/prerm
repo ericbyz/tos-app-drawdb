@@ -1,0 +1,4 @@
+#!/bin/bash
+set -e
+# Pure static app: no service to stop.
+exit 0

@@ -1,0 +1,22 @@
+This product (TOS App Center packaging of DrawDB) includes software developed
+by the DrawDB project:
+
+  DrawDB - Free, simple, and extensible online database diagram editor
+  https://github.com/drawdb-io/drawdb
+  Copyright the DrawDB contributors
+  Licensed under the GNU Affero General Public License v3.0
+  https://www.gnu.org/licenses/agpl-3.0.html
+
+The packaged web application is built from the upstream source at the commit
+pinned in the UPSTREAM file of this repository (scripts/build_web.sh,
+reproducible; dist SHA256 manifest committed as webui/SHA256SUMS). Build-time
+transforms applied to the produced dist only — upstream sources are not
+modified:
+
+  1. Asset localization: vite --base=/drawdb/, and the runtime-loaded
+     monaco editor, pdfobject and icon-font CSS/fonts are bundled into the
+     dist instead of being fetched from public CDNs (intranet-safe).
+  2. No upstream source files were changed.
+
+The TOS packaging metadata, build scripts, nginx config and documentation in
+this repository are original work by ericbyz, licensed under the MIT License.
