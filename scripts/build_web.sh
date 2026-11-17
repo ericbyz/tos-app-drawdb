@@ -4,11 +4,14 @@
 # ============================================================
 # - downloads upstream source tarball at the commit pinned in UPSTREAM
 #   (via gh api — the codeload channel survives flaky github.com routes)
-# - npm ci + vite build with --base=/drawdb/ (upstream sources stay
-#   unmodified; base is a CLI override)
-# - post-processes the dist for intranet use:
-#     * bundles monaco editor, pdfobject, bootstrap-icons + font-awesome
-#       CSS/fonts locally; rewrites the runtime CDN URLs in the built JS
+# - applies ONE declared packaging patch: BrowserRouter -> HashRouter
+#   (upstream hosts at a domain root with no basename; under /drawdb/
+#   every BrowserRouter route would 404 — see NOTICE)
+# - npm ci + vite build with --base=/drawdb/ (CLI override, sources
+#   otherwise unmodified)
+# - post-processes the dist for intranet use: bundles monaco editor,
+#   pdfobject, bootstrap-icons + font-awesome CSS/fonts locally and
+#   rewrites the runtime CDN URLs in the built JS
 # - verifies no external asset URLs remain, emits webui/SHA256SUMS and
 #   publishes dist -> repo webui/
 #
@@ -54,10 +57,9 @@ if [[ "${NODE_MAJOR}" -lt 20 ]]; then
         echo "== fetching portable node v${NODE_VERSION} (build toolchain only)"
         curl -fsSL --retry 3 -o "${CACHE}/node22.zip" "${NODE_DIST_URL}/v${NODE_VERSION}/node-v${NODE_VERSION}-win-x64.zip"
         mkdir -p "${CACHE}/node22x"
-        (cd "${CACHE}/node22x" && python3 -c "
-import zipfile
-zipfile.ZipFile('${CACHE}/node22.zip').extractall('${CACHE}/node22x')
-")
+        WIN_ZIP=$(cygpath -w "${CACHE}/node22.zip")
+        WIN_OUT=$(cygpath -w "${CACHE}/node22x")
+        python3 -c "import zipfile; zipfile.ZipFile(r'$WIN_ZIP').extractall(r'$WIN_OUT')"
         rm -rf "${PORTABLE}"; mv "${CACHE}/node22x/node-v${NODE_VERSION}-win-x64" "${PORTABLE}"
     fi
     NODE_BIN="${PORTABLE}/node.exe"
@@ -71,7 +73,7 @@ if [[ ! -f "${TARBALL}" ]]; then
     echo "== downloading source tarball ${REPO} @ ${COMMIT}"
     gh api "repos/${REPO#https://github.com/}/tarball/${COMMIT}" > "${TARBALL}"
 fi
-if [[ ! -f "${SRC}/package.json" ]] || ! grep -q '"name"' "${SRC}/package.json"; then
+if [[ ! -f "${SRC}/package.json" || ! -f "${SRC}/src/App.jsx" ]] || ! grep -q '"name"' "${SRC}/package.json"; then
     echo "== extracting source"
     rm -rf "${SRC}"
     mkdir -p "${SRC}"
@@ -79,11 +81,38 @@ if [[ ! -f "${SRC}/package.json" ]] || ! grep -q '"name"' "${SRC}/package.json";
 fi
 grep -q '"name"' "${SRC}/package.json" || { echo "ERROR: bad source tree" >&2; exit 1; }
 
+# ---- TOS packaging patch (declared in NOTICE): HashRouter for sub-path ----
+# DrawDB uses BrowserRouter with no basename; under /drawdb/ every route
+# would hit the NotFound page. One-line import swap to HashRouter resolves
+# all routes under the app sub-path (URL /drawdb/#/editor). No other change.
+APP_PATCH="${SRC}/src/App.jsx"
+if ! grep -q "HashRouter as BrowserRouter" "${APP_PATCH}"; then
+    echo "== applying HashRouter patch (TOS packaging)"
+    python3 - "${APP_PATCH}" <<'PATCHPY'
+import sys
+p = sys.argv[1]
+src = open(p, encoding="utf-8").read()
+src = src.replace(
+    'import { BrowserRouter, Routes, Route, useLocation } from "react-router-dom";',
+    'import { HashRouter as BrowserRouter, Routes, Route, useLocation } from "react-router-dom";')
+open(p, "w", encoding="utf-8", newline="\n").write(src)
+print("  patched: HashRouter as BrowserRouter")
+PATCHPY
+fi
+grep -q "HashRouter as BrowserRouter" "${APP_PATCH}" || { echo "ERROR: HashRouter patch failed" >&2; exit 1; }
+
 # ---- dependencies ----
 if [[ "${1:-}" != "--no-install" ]]; then
     echo "== npm ci (node ${NODE_VERSION})"
-    (cd "${SRC}" && rm -rf node_modules && "${NODE_BIN}" ./node_modules/npm/bin/npm-cli.js ci --no-audit --no-fund 2>/dev/null) \
-      || (cd "${SRC}" && npm ci --no-audit --no-fund)
+    # portable node ships its own npm — invoke its cli via NODE_BIN so the
+    # build never mixes runtimes (system npm would fetch linux-only bindings)
+    NPM_CLI="${CACHE}/node-v${NODE_VERSION}-win-x64/node_modules/npm/bin/npm-cli.js"
+    if [[ ! -f "${NPM_CLI}" ]]; then
+        NPM_CLI="$(command -v npm || echo npm)"
+    fi
+    (cd "${SRC}" && rm -rf node_modules && "${NODE_BIN}" "${NPM_CLI}" ci --no-audit --no-fund)
+    # rolldown native binding: npm optional-deps bug can skip the win32 package
+    (cd "${SRC}" && "${NODE_BIN}" "${NPM_CLI}" install @rolldown/binding-win32-x64-msvc --no-save --no-audit --no-fund >/dev/null 2>&1 || true)
 fi
 
 # ---- vite build (base overridden via CLI, upstream config untouched) ----
@@ -98,10 +127,10 @@ DIST="${SRC}/dist"
 
 # ---- bundle runtime vendors (monaco / pdfobject / icon fonts) ----
 echo "== bundling runtime vendors (monaco, pdfobject, icon fonts)"
-BASE="${BASE}" python3 - "${DIST}" <<'ENDPY'
+(cd "${DIST}" && BASE="${BASE}" python3 - <<'ENDPY'
 import glob, os, sys, urllib.request
 
-dist = sys.argv[1]
+dist = os.getcwd()
 base = os.environ["BASE"].rstrip("/") + "/"
 
 MONACO = "https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs"
@@ -109,53 +138,63 @@ PDFOBJECT = "https://cdnjs.cloudflare.com/ajax/libs/pdfobject/2.1.1/pdfobject.mi
 BI_CSS = "https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.1/font/bootstrap-icons.css"
 FA_CSS = "https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css"
 
-def fetch(url, out):
+def fetch(url, out, tries=4):
     if os.path.exists(out) and os.path.getsize(out) > 0:
         return
-    os.makedirs(os.path.dirname(out), exist_ok=True)
+    d = os.path.dirname(out)
+    if d:
+        os.makedirs(d, exist_ok=True)
+    import time
     req = urllib.request.Request(url, headers={"User-Agent": "tos-app-drawdb/1.0"})
-    with urllib.request.urlopen(req, timeout=90) as r, open(out, "wb") as f:
-        f.write(r.read())
+    last = None
+    for attempt in range(tries):
+        try:
+            with urllib.request.urlopen(req, timeout=90) as r, open(out, "wb") as f:
+                f.write(r.read())
+            return
+        except Exception as e:
+            last = e
+            time.sleep(3 * (attempt + 1))
+    raise SystemExit(f"ERROR: download failed after {tries} tries: {url} ({last})")
 
-os.makedirs(f"{dist}/assets/vendor", exist_ok=True)
-os.makedirs(f"{dist}/assets/fonts/bootstrap-icons", exist_ok=True)
-os.makedirs(f"{dist}/assets/fonts/webfonts", exist_ok=True)
-os.makedirs(f"{dist}/monaco", exist_ok=True)
+os.makedirs("assets/vendor", exist_ok=True)
+os.makedirs("assets/fonts/bootstrap-icons", exist_ok=True)
+os.makedirs("assets/fonts/webfonts", exist_ok=True)
+os.makedirs("monaco", exist_ok=True)
 
 # monaco editor (npm tarball; ~18MB, holds min/vs)
-if not os.path.exists(f"{dist}/monaco/min/vs/loader.js"):
-    tgz = f"{dist}/monaco.tgz"
+if not os.path.exists("monaco/min/vs/loader.js"):
+    tgz = "monaco.tgz"
     fetch("https://registry.npmjs.org/monaco-editor/-/monaco-editor-0.52.2.tgz", tgz)
     import tarfile
     with tarfile.open(tgz) as tf:
         for m in tf.getmembers():
-            if m.name.startswith("package/min/"):
-                tf.extract(m, f"{dist}/monaco", filter="data")
+            if m.name.startswith("package/min/") and m.isfile():
+                rel = os.path.relpath(m.name, "package")
+                out = os.path.join("monaco", rel)
+                os.makedirs(os.path.dirname(out), exist_ok=True)
+                with tf.extractfile(m) as f, open(out, "wb") as g:
+                    g.write(f.read())
     os.remove(tgz)
-assert os.path.exists(f"{dist}/monaco/min/vs/loader.js"), "monaco min/vs missing"
+assert os.path.exists("monaco/min/vs/loader.js"), "monaco min/vs missing"
 
-# pdfobject
-fetch(PDFOBJECT, f"{dist}/assets/vendor/pdfobject.min.js")
-
-# icon fonts (css + woff/woff2)
-fetch(BI_CSS, f"{dist}/assets/vendor/bootstrap-icons.css")
+fetch(PDFOBJECT, "assets/vendor/pdfobject.min.js")
+fetch(BI_CSS, "assets/vendor/bootstrap-icons.css")
 for f in ("bootstrap-icons.woff2", "bootstrap-icons.woff"):
     fetch(f"https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.1/font/fonts/{f}",
-          f"{dist}/assets/fonts/bootstrap-icons/{f}")
-fetch(FA_CSS, f"{dist}/assets/vendor/font-awesome.css")
+          f"assets/fonts/bootstrap-icons/{f}")
+fetch(FA_CSS, "assets/vendor/font-awesome.css")
 for f in ("fa-brands-400", "fa-regular-400", "fa-solid-900", "fa-v4compatibility"):
     fetch(f"https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/webfonts/{f}.woff2",
-          f"{dist}/assets/fonts/webfonts/{f}.woff2")
+          f"assets/fonts/webfonts/{f}.woff2")
 
-# rewrite css-internal font urls to the bundled files
-p = f"{dist}/assets/vendor/bootstrap-icons.css"
+p = "assets/vendor/bootstrap-icons.css"
 s = open(p, encoding="utf-8").read()
 open(p, "w", encoding="utf-8", newline="\n").write(s.replace("./fonts/", "../fonts/bootstrap-icons/"))
-p = f"{dist}/assets/vendor/font-awesome.css"
+p = "assets/vendor/font-awesome.css"
 s = open(p, encoding="utf-8").read()
 open(p, "w", encoding="utf-8", newline="\n").write(s.replace("../webfonts/", "../fonts/webfonts/"))
 
-# patch html + runtime JS: CDN urls -> local paths
 def patch(p):
     s = open(p, encoding="utf-8", errors="ignore").read()
     orig = s
@@ -166,18 +205,18 @@ def patch(p):
     if s != orig:
         open(p, "w", encoding="utf-8", newline="\n").write(s)
 
-patch(f"{dist}/index.html")
-for p in glob.glob(f"{dist}/assets/*.js") + glob.glob(f"{dist}/assets/*.css"):
+patch("index.html")
+for p in glob.glob("assets/*.js") + glob.glob("assets/*.css"):
     patch(p)
 print("  vendors bundled and urls localized")
 ENDPY
+)
 
 # ---- verify: no external asset sources left ----
 echo "== verifying dist"
-BASE="${BASE}" python3 - "${DIST}" <<'ENDPY'
+(cd "${DIST}" && BASE="${BASE}" python3 - <<'ENDPY'
 import glob, os, re, sys
 
-dist = sys.argv[1]
 base = os.environ["BASE"].rstrip("/") + "/"
 
 FORBIDDEN = [
@@ -185,8 +224,8 @@ FORBIDDEN = [
     "fonts.googleapis.com", "fonts.gstatic.com",
 ]
 
-haystack = open(os.path.join(dist, "index.html"), encoding="utf-8").read()
-for p in glob.glob(os.path.join(dist, "assets", "*.css")):
+haystack = open("index.html", encoding="utf-8").read()
+for p in glob.glob("assets/*.css"):
     haystack += open(p, encoding="utf-8", errors="ignore").read()
 for s in FORBIDDEN:
     if s in haystack:
@@ -203,21 +242,24 @@ def assert_no_drive_path(text, what):
 
 assert_no_drive_path(haystack, "dist html/css")
 
-html_text = open(os.path.join(dist, "index.html"), encoding="utf-8").read()
+html_text = open("index.html", encoding="utf-8").read()
 for attr, url in re.findall(r'((?:src|href))="(/[^"]+)"', html_text):
     if not url.startswith(base):
         if url not in ("/config.js", "/robots.txt"):
             raise SystemExit(f"ERROR: index.html {attr}={url!r} outside {base}")
 
-if not os.path.exists(os.path.join(dist, "monaco", "min", "vs", "loader.js")):
+if not os.path.exists("monaco/min/vs/loader.js"):
     raise SystemExit("ERROR: bundled monaco missing")
-if not os.path.exists(os.path.join(dist, "assets", "vendor", "pdfobject.min.js")):
+if not os.path.exists("assets/vendor/pdfobject.min.js"):
     raise SystemExit("ERROR: bundled pdfobject missing")
-fonts = sum(len(fs) for _, _, fs in os.walk(os.path.join(dist, "assets", "fonts")))
+fonts = sum(len(fs) for _, _, fs in os.walk("assets/fonts"))
 if fonts < 6:
     raise SystemExit("ERROR: bundled icon fonts incomplete")
+if "HashRouter as BrowserRouter" not in open("../src/App.jsx", encoding="utf-8").read():
+    raise SystemExit("ERROR: HashRouter patch missing in source")
 print("  dist verified: localized, drive-path free, vendors bundled")
 ENDPY
+)
 
 # ---- publish dist -> repo webui/ with SHA256 manifest ----
 echo "== publishing dist -> webui/"
