@@ -50,7 +50,10 @@ NODE_VERSION="${PIN[NODE_VERSION]:-22.20.0}"
 # ---- resolve a node >= 20 runtime (portable tree preferred, no install) ----
 NODE_BIN="$(command -v node || true)"
 NODE_MAJOR=0
-[[ -n "${NODE_BIN}" ]] && NODE_MAJOR=$("${NODE_BIN}" -e 'console.log(process.versions.node.split(".")[0])' 2>/dev/null || echo 0)
+if [[ -z "${NODE_BIN}" ]]; then
+    NODE_BIN="${CACHE}/node-v${NODE_VERSION}-win-x64/node.exe"
+fi
+NODE_MAJOR=$("${NODE_BIN}" -e 'console.log(process.versions.node.split(".")[0])' 2>/dev/null || echo 0)
 if [[ "${NODE_MAJOR}" -lt 20 ]]; then
     PORTABLE="${CACHE}/node-v${NODE_VERSION}-win-x64"
     if [[ ! -x "${PORTABLE}/node.exe" ]]; then
@@ -64,7 +67,13 @@ if [[ "${NODE_MAJOR}" -lt 20 ]]; then
     fi
     NODE_BIN="${PORTABLE}/node.exe"
 fi
-echo "== node: $(${NODE_BIN} --version)"
+# portable node ships its own npm — invoke its cli via NODE_BIN so the build
+# never mixes runtimes (system npm would fetch linux-only native bindings)
+NPM_CLI="$(dirname "${NODE_BIN}")/node_modules/npm/bin/npm-cli.js"
+if [[ ! -f "${NPM_CLI}" ]]; then
+    NPM_CLI="$(command -v npm || echo npm)"
+fi
+echo "== node: $(${NODE_BIN} --version) | npm-cli: ${NPM_CLI}"
 
 # ---- fetch / verify upstream source at the pinned commit ----
 mkdir -p "${CACHE}"
@@ -104,12 +113,6 @@ grep -q "HashRouter as BrowserRouter" "${APP_PATCH}" || { echo "ERROR: HashRoute
 # ---- dependencies ----
 if [[ "${1:-}" != "--no-install" ]]; then
     echo "== npm ci (node ${NODE_VERSION})"
-    # portable node ships its own npm — invoke its cli via NODE_BIN so the
-    # build never mixes runtimes (system npm would fetch linux-only bindings)
-    NPM_CLI="${CACHE}/node-v${NODE_VERSION}-win-x64/node_modules/npm/bin/npm-cli.js"
-    if [[ ! -f "${NPM_CLI}" ]]; then
-        NPM_CLI="$(command -v npm || echo npm)"
-    fi
     (cd "${SRC}" && rm -rf node_modules && "${NODE_BIN}" "${NPM_CLI}" ci --no-audit --no-fund)
     # rolldown native binding: npm optional-deps bug can skip the win32 package
     (cd "${SRC}" && "${NODE_BIN}" "${NPM_CLI}" install @rolldown/binding-win32-x64-msvc --no-save --no-audit --no-fund >/dev/null 2>&1 || true)
@@ -255,7 +258,8 @@ if not os.path.exists("assets/vendor/pdfobject.min.js"):
 fonts = sum(len(fs) for _, _, fs in os.walk("assets/fonts"))
 if fonts < 6:
     raise SystemExit("ERROR: bundled icon fonts incomplete")
-if "HashRouter as BrowserRouter" not in open("../src/App.jsx", encoding="utf-8").read():
+app_src = open("../src/App.jsx", encoding="utf-8").read()
+if "HashRouter as BrowserRouter" not in app_src:
     raise SystemExit("ERROR: HashRouter patch missing in source")
 print("  dist verified: localized, drive-path free, vendors bundled")
 ENDPY
